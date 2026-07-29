@@ -1,0 +1,104 @@
+name: Deploy (docker compose over SSH)
+
+# Optional deployment stage. This repo is intentionally separate from
+# Backend and Frontend (see README-DEVSECOPS.md > "Repository layout") so
+# it can pull whatever images those repos' CI pipelines published to GHCR
+# and (re)deploy the stack independently.
+#
+# Two ways to trigger it:
+#  1. Manual (workflow_dispatch) — the default, safest option: a human
+#     checks that Backend/Frontend CI is green, then runs this workflow.
+#  2. Automatic via repository_dispatch — wire this up by adding a final
+#     step to Backend/Frontend's `security-gate` job (only on main, only on
+#     success) that calls the GitHub API to dispatch a
+#     `security-gate-passed` event to this repo. See README-DEVSECOPS.md
+#     for the exact snippet and the DISPATCH_TOKEN secret it needs.
+
+on:
+  workflow_dispatch:
+    inputs:
+      backend_tag:
+        description: 'Backend image tag to deploy'
+        required: false
+        default: 'latest'
+      frontend_tag:
+        description: 'Frontend image tag to deploy'
+        required: false
+        default: 'latest'
+  repository_dispatch:
+    types: [security-gate-passed]
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy to target host
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve image tags
+        id: tags
+        run: |
+          echo "backend_tag=${{ github.event.inputs.backend_tag || 'latest' }}" >> "$GITHUB_OUTPUT"
+          echo "frontend_tag=${{ github.event.inputs.frontend_tag || 'latest' }}" >> "$GITHUB_OUTPUT"
+
+      - name: Copy compose files to target host
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          source: "docker-compose.yml"
+          target: "~/transport-devsecops"
+          strip_components: 0
+
+      - name: Deploy via docker compose
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          BACKEND_IMAGE: ghcr.io/${{ github.repository_owner }}/backend:${{ steps.tags.outputs.backend_tag }}
+          FRONTEND_IMAGE: ghcr.io/${{ github.repository_owner }}/frontend:${{ steps.tags.outputs.frontend_tag }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          envs: BACKEND_IMAGE,FRONTEND_IMAGE
+          script: |
+            set -e
+            cd ~/transport-devsecops
+            echo "MSSQL_SA_PASSWORD=${{ secrets.MSSQL_SA_PASSWORD }}" > .env
+            echo "MAIL_USERNAME=${{ secrets.MAIL_USERNAME }}" >> .env
+            echo "MAIL_PASSWORD=${{ secrets.MAIL_PASSWORD }}" >> .env
+            echo "RASP_ENABLED=true" >> .env
+            echo "RASP_MODE=block" >> .env
+            echo "RASP_DEMO_ENABLED=false" >> .env
+            echo "BACKEND_IMAGE=$BACKEND_IMAGE" >> .env
+            echo "FRONTEND_IMAGE=$FRONTEND_IMAGE" >> .env
+            # GHCR packages published by the CI workflows default to public
+            # visibility for this project; if you make them private, add a
+            # `docker login ghcr.io -u <user> --password-stdin <<< <PAT>`
+            # step here using a GHCR_PAT secret with read:packages scope.
+            docker compose pull backend frontend || true
+            docker compose up -d --remove-orphans
+            docker image prune -f
+
+      - name: Smoke-test deployment
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            set -e
+            for i in $(seq 1 20); do
+              if curl -fs http://localhost:${BACKEND_PORT:-8080}/actuator/health >/dev/null; then
+                echo "Backend healthy."
+                exit 0
+              fi
+              sleep 5
+            done
+            echo "Backend did not become healthy in time" >&2
+            exit 1

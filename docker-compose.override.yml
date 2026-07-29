@@ -1,0 +1,15 @@
+# Local-development only. Compose auto-merges this file whenever it's
+# present next to docker-compose.yml, so `docker compose up -d --build`
+# keeps working exactly as before. This file is NOT copied to the Ubuntu
+# server by deploy.yml, so production always runs the image-only base file.
+
+services:
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile

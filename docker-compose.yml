@@ -1,0 +1,100 @@
+name: transport-devsecops
+
+# Production-safe by design: every service here is `image:`-only, no `build:`.
+# This is the exact file `deploy.yml` copies to the Ubuntu server, so the
+# server only ever pulls pre-built images from GHCR — never builds from
+# source. For local development (build from ../backend, ../frontend), see
+# docker-compose.override.yml, which Compose auto-merges in this directory
+# but which is never shipped to the server.
+
+services:
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: sqlserver
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:?set MSSQL_SA_PASSWORD in .env}
+      MSSQL_PID: ${MSSQL_PID:-Express}
+    volumes:
+      - mssql-data:/var/opt/mssql
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -Q 'SELECT 1' -b -o /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks: [transport-net]
+
+  # One-shot: a fresh SQL Server instance only has `master`. Spring's
+  # ddl-auto=update creates tables, not the database itself, so this creates
+  # `vanoiseee` before the backend's first connection attempt. Idempotent —
+  # safe to run again on every `docker compose up`.
+  db-init:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: transport-db-init
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+    environment:
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:?set MSSQL_SA_PASSWORD in .env}
+    entrypoint: ["/bin/bash", "-c"]
+    command: >
+      /opt/mssql-tools18/bin/sqlcmd -C -S sqlserver -U sa -P "$$MSSQL_SA_PASSWORD"
+      -Q "IF DB_ID('vanoiseee') IS NULL CREATE DATABASE vanoiseee"
+    networks: [transport-net]
+    restart: "no"
+
+  backend:
+    image: ${BACKEND_IMAGE:-transport-backend:local}
+    container_name: transport-backend
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+    environment:
+      SPRING_DATASOURCE_URL: "jdbc:sqlserver://sqlserver:1433;databaseName=vanoiseee;encrypt=false;trustServerCertificate=true"
+      DB_PASSWORD: ${MSSQL_SA_PASSWORD:?set MSSQL_SA_PASSWORD in .env}
+      MAIL_USERNAME: ${MAIL_USERNAME:-}
+      MAIL_PASSWORD: ${MAIL_PASSWORD:-}
+      # --- RASP (Runtime Application Self-Protection) ---
+      RASP_ENABLED: ${RASP_ENABLED:-true}
+      RASP_MODE: ${RASP_MODE:-block}
+      RASP_LOG_DIR: /app/rasp-logs
+      # Deliberately-vulnerable demo endpoints (/api/rasp-demo/**) — leave
+      # false unless you are actively running the attack demonstration in
+      # README-DEVSECOPS.md > "Runtime Validation" on an isolated machine.
+      RASP_DEMO_ENABLED: ${RASP_DEMO_ENABLED:-false}
+    ports:
+      - "${BACKEND_PORT:-8080}:8080"
+    volumes:
+      - rasp-logs:/app/rasp-logs
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8080/actuator/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    networks: [transport-net]
+
+  frontend:
+    image: ${FRONTEND_IMAGE:-transport-frontend:local}
+    container_name: transport-frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-8081}:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks: [transport-net]
+
+networks:
+  transport-net:
+    driver: bridge
+
+volumes:
+  rasp-logs:
+  mssql-data:
