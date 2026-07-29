@@ -37,10 +37,16 @@ services:
         condition: service_healthy
     environment:
       MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:?set MSSQL_SA_PASSWORD in .env}
+    # entrypoint+command are both array-form on purpose: with `bash -c`,
+    # everything after the script string becomes positional params ($0, $1,
+    # ...) rather than part of the command line, so the whole sqlcmd
+    # invocation must be passed as a single string argument, not split.
     entrypoint: ["/bin/bash", "-c"]
-    command: >
-      /opt/mssql-tools18/bin/sqlcmd -C -S sqlserver -U sa -P "$$MSSQL_SA_PASSWORD"
-      -Q "IF DB_ID('vanoiseee') IS NULL CREATE DATABASE vanoiseee"
+    command:
+      - >-
+        /opt/mssql-tools18/bin/sqlcmd -C -S sqlserver -U sa
+        -P "$$MSSQL_SA_PASSWORD"
+        -Q "IF DB_ID('vanoiseee') IS NULL CREATE DATABASE vanoiseee"
     networks: [transport-net]
     restart: "no"
 
@@ -84,7 +90,7 @@ services:
     ports:
       - "${FRONTEND_PORT:-8081}:8080"
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
       interval: 15s
       timeout: 5s
       retries: 10
