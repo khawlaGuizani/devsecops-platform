@@ -1,0 +1,48 @@
+# Nightly SQL Server backup, standard DBA pattern (BACKUP DATABASE +
+# xp_delete_file for rotation), adapted to run inside K8s.
+#
+# This Job doesn't mount any volume itself — it's just an sqlcmd client
+# connecting to the sqlserver Service over the network. BACKUP DATABASE
+# executes server-side, so the resulting .bak file is written directly
+# into the sqlserver pod's own /var/opt/mssql/backup — the separate
+# `mssql-backup` PVC added in 03-sqlserver.yaml.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: sqlserver-backup
+  namespace: transport
+spec:
+  schedule: "0 2 * * *" # every day at 02:00
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: backup
+              image: mcr.microsoft.com/mssql/server:2022-latest
+              env:
+                - name: MSSQL_SA_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: transport-secrets
+                      key: MSSQL_SA_PASSWORD
+              command: ["/bin/bash", "-c"]
+              args:
+                - |
+                  set -e
+                  FILE="/var/opt/mssql/backup/vanoiseee_$(date +%Y%m%d_%H%M%S).bak"
+                  # WITH COMPRESSION requires a non-Express edition — plain
+                  # WITH INIT only, matching the Express edition used here.
+                  /opt/mssql-tools18/bin/sqlcmd -C -S sqlserver -U sa -P "$MSSQL_SA_PASSWORD" \
+                    -Q "BACKUP DATABASE vanoiseee TO DISK = N'$FILE' WITH INIT"
+                  # Rotation: drop backups older than 7 days. The cutoff is
+                  # computed here (not via DATEADD in the query itself) and
+                  # passed as a literal string — xp_delete_file's date
+                  # argument doesn't parse an in-place expression reliably.
+                  CUTOFF=$(date -u -d '7 days ago' +%Y-%m-%dT00:00:00)
+                  /opt/mssql-tools18/bin/sqlcmd -C -S sqlserver -U sa -P "$MSSQL_SA_PASSWORD" \
+                    -Q "EXEC master.dbo.xp_delete_file 0, N'/var/opt/mssql/backup/', N'bak', N'$CUTOFF'"

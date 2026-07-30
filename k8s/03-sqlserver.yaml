@@ -31,6 +31,8 @@ spec:
           volumeMounts:
             - name: mssql-data
               mountPath: /var/opt/mssql
+            - name: mssql-backup
+              mountPath: /var/opt/mssql/backup
           resources:
             requests:
               cpu: "1"
@@ -67,6 +69,17 @@ spec:
         resources:
           requests:
             storage: 5Gi
+    # Kept on a separate PVC from the live data files (even though both end
+    # up on the same node's disk with local-path) so that operations
+    # touching the data volume specifically don't also risk the backups.
+    - metadata:
+        name: mssql-backup
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 2Gi
 ---
 apiVersion: v1
 kind: Service
