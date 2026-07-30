@@ -15,6 +15,7 @@ services:
       ACCEPT_EULA: "Y"
       MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:?set MSSQL_SA_PASSWORD in .env}
       MSSQL_PID: ${MSSQL_PID:-Express}
+    restart: unless-stopped
     volumes:
       - mssql-data:/var/opt/mssql
     healthcheck:
@@ -69,6 +70,7 @@ services:
       # false unless you are actively running the attack demonstration in
       # README-DEVSECOPS.md > "Runtime Validation" on an isolated machine.
       RASP_DEMO_ENABLED: ${RASP_DEMO_ENABLED:-false}
+    restart: unless-stopped
     ports:
       - "${BACKEND_PORT:-8080}:8080"
     volumes:
@@ -87,6 +89,7 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+    restart: unless-stopped
     ports:
       - "${FRONTEND_PORT:-8081}:8080"
     healthcheck:
