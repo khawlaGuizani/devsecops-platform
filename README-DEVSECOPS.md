@@ -192,12 +192,15 @@ Configure these under **Settings → Secrets and variables → Actions** in
 
 ### devsecops-platform (deploy workflow only — optional)
 
+`deploy.yml` runs on a **self-hosted runner installed directly on the
+target host** (vm1) — it is on a private LAN, unreachable from GitHub's
+cloud-hosted runners, so no SSH secrets are needed at all; the runner pulls
+jobs from GitHub instead of GitHub pushing to it. See `actions-runner/` on
+the host and GitHub → this repo → Settings → Actions → Runners.
+
 | Secret | Required? | Used for |
 |---|---|---|
-| `DEPLOY_HOST` | If using `deploy.yml` | Target server hostname/IP |
-| `DEPLOY_USER` | If using `deploy.yml` | SSH user on the target server |
-| `DEPLOY_SSH_KEY` | If using `deploy.yml` | Private key for that user (add the matching public key to the server's `authorized_keys`) |
-| `MSSQL_SA_PASSWORD` | If using `deploy.yml` | Written into the target server's `.env` for `docker compose` |
+| `MSSQL_SA_PASSWORD` | If using `deploy.yml` | Written into the target host's `.env` for `docker compose` |
 | `MAIL_USERNAME` / `MAIL_PASSWORD` | Optional | SMTP credentials, same as above |
 
 ### SonarCloud project keys used
@@ -569,12 +572,26 @@ filebeat.inputs:
 
 ## 11. Deployment (optional)
 
-`devsecops-platform/.github/workflows/deploy.yml` deploys the stack to a
-target host over SSH: it copies `docker-compose.yml` **only** (never
-`docker-compose.override.yml` or source code — see §1a below), writes a
-`.env` from GitHub Secrets, then runs `docker compose pull backend frontend
-&& docker compose up -d --remove-orphans`. Because the shipped compose file
-has no `build:` sections, this can never trigger a build on the server.
+`devsecops-platform/.github/workflows/deploy.yml` deploys the stack via a
+**self-hosted GitHub Actions runner installed directly on the target host**
+(vm1, `192.168.205.150`) — a private-LAN address unreachable from GitHub's
+cloud-hosted runners, so a hosted-runner-over-SSH approach cannot work here.
+The self-hosted runner pulls jobs from GitHub instead of GitHub pushing to
+it, so no inbound network access, SSH keys, or open ports are needed.
+
+The job checks out this repo on the runner (i.e. directly on vm1), writes
+`.env` from GitHub Secrets, then runs `docker compose -f docker-compose.yml
+pull backend frontend && docker compose -f docker-compose.yml up -d
+--remove-orphans` — explicitly excluding `docker-compose.override.yml`
+(present in the checkout since it's tracked in git, but only meant for
+local dev builds — see §11a below) so it never gets auto-merged in.
+Because `docker-compose.yml` itself has no `build:` sections, this can
+never trigger a build.
+
+To set up the runner on a new host: GitHub → this repo → Settings →
+Actions → Runners → New self-hosted runner, follow the Linux x64
+instructions, then install it as a systemd service so it survives reboots:
+`sudo ./svc.sh install && sudo ./svc.sh start`.
 
 Two ways it triggers:
 1. Manual (`workflow_dispatch`) — a human checks that Backend/Frontend CI is
