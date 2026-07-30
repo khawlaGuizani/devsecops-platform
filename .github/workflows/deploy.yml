@@ -1,18 +1,23 @@
-name: Deploy (docker compose over SSH)
+name: Deploy (self-hosted runner)
 
-# Optional deployment stage. This repo is intentionally separate from
-# Backend and Frontend (see README-DEVSECOPS.md > "Repository layout") so
-# it can pull whatever images those repos' CI pipelines published to GHCR
-# and (re)deploy the stack independently.
+# This repo is intentionally separate from Backend and Frontend (see
+# README-DEVSECOPS.md > "Repository layout") so it can pull whatever images
+# those repos' CI pipelines published to GHCR and (re)deploy the stack
+# independently.
+#
+# The target server (vm1) is on a private LAN, unreachable from GitHub's
+# cloud runners — so instead of SSH-ing in from a hosted runner, a
+# self-hosted GitHub Actions runner runs directly ON the target machine
+# (see README-DEVSECOPS.md > "Deployment"). This job below therefore runs
+# locally on that machine: no SSH keys, no network path needed, just
+# `docker compose` executed where the containers actually live.
 #
 # Two ways to trigger it:
-#  1. Manual (workflow_dispatch) — the default, safest option: a human
-#     checks that Backend/Frontend CI is green, then runs this workflow.
-#  2. Automatic via repository_dispatch — wire this up by adding a final
-#     step to Backend/Frontend's `security-gate` job (only on main, only on
-#     success) that calls the GitHub API to dispatch a
-#     `security-gate-passed` event to this repo. See README-DEVSECOPS.md
-#     for the exact snippet and the DISPATCH_TOKEN secret it needs.
+#  1. Manual (workflow_dispatch) — a human checks that Backend/Frontend CI
+#     is green, then runs this workflow.
+#  2. Automatic via repository_dispatch — Backend/Frontend's `security-gate`
+#     job POSTs a `security-gate-passed` event here once green on main,
+#     using the DISPATCH_TOKEN secret (see README-DEVSECOPS.md > §5).
 
 on:
   workflow_dispatch:
@@ -33,8 +38,8 @@ permissions:
 
 jobs:
   deploy:
-    name: Deploy to target host
-    runs-on: ubuntu-latest
+    name: Deploy on vm1 (self-hosted runner)
+    runs-on: self-hosted
     environment: production
     steps:
       - name: Checkout repository
@@ -46,59 +51,43 @@ jobs:
           echo "backend_tag=${{ github.event.inputs.backend_tag || 'latest' }}" >> "$GITHUB_OUTPUT"
           echo "frontend_tag=${{ github.event.inputs.frontend_tag || 'latest' }}" >> "$GITHUB_OUTPUT"
 
-      - name: Copy compose files to target host
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          source: "docker-compose.yml"
-          target: "~/transport-devsecops"
-          strip_components: 0
+      - name: Write .env
+        run: |
+          cat > .env <<EOF
+          MSSQL_SA_PASSWORD=${{ secrets.MSSQL_SA_PASSWORD }}
+          MAIL_USERNAME=${{ secrets.MAIL_USERNAME }}
+          MAIL_PASSWORD=${{ secrets.MAIL_PASSWORD }}
+          RASP_ENABLED=true
+          RASP_MODE=block
+          RASP_DEMO_ENABLED=false
+          BACKEND_IMAGE=ghcr.io/${{ github.repository_owner }}/backend:${{ steps.tags.outputs.backend_tag }}
+          FRONTEND_IMAGE=ghcr.io/${{ github.repository_owner }}/frontend:${{ steps.tags.outputs.frontend_tag }}
+          EOF
 
       - name: Deploy via docker compose
-        uses: appleboy/ssh-action@v1.2.0
-        env:
-          BACKEND_IMAGE: ghcr.io/${{ github.repository_owner }}/backend:${{ steps.tags.outputs.backend_tag }}
-          FRONTEND_IMAGE: ghcr.io/${{ github.repository_owner }}/frontend:${{ steps.tags.outputs.frontend_tag }}
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          envs: BACKEND_IMAGE,FRONTEND_IMAGE
-          script: |
-            set -e
-            cd ~/transport-devsecops
-            echo "MSSQL_SA_PASSWORD=${{ secrets.MSSQL_SA_PASSWORD }}" > .env
-            echo "MAIL_USERNAME=${{ secrets.MAIL_USERNAME }}" >> .env
-            echo "MAIL_PASSWORD=${{ secrets.MAIL_PASSWORD }}" >> .env
-            echo "RASP_ENABLED=true" >> .env
-            echo "RASP_MODE=block" >> .env
-            echo "RASP_DEMO_ENABLED=false" >> .env
-            echo "BACKEND_IMAGE=$BACKEND_IMAGE" >> .env
-            echo "FRONTEND_IMAGE=$FRONTEND_IMAGE" >> .env
-            # GHCR packages published by the CI workflows default to public
-            # visibility for this project; if you make them private, add a
-            # `docker login ghcr.io -u <user> --password-stdin <<< <PAT>`
-            # step here using a GHCR_PAT secret with read:packages scope.
-            docker compose pull backend frontend || true
-            docker compose up -d --remove-orphans
-            docker image prune -f
+        run: |
+          set -e
+          # -f explicitly: the checkout also contains docker-compose.override.yml
+          # (tracked in git, used for local dev builds) — without -f, Compose
+          # would auto-merge it and try to build from ../backend/../frontend,
+          # which don't exist in this runner's isolated checkout.
+          # GHCR packages published by the CI workflows default to public
+          # visibility for this project; if you make them private, add a
+          # `docker login ghcr.io -u <user> --password-stdin <<< <PAT>` step
+          # here using a GHCR_PAT secret with read:packages scope.
+          docker compose -f docker-compose.yml pull backend frontend || true
+          docker compose -f docker-compose.yml up -d --remove-orphans
+          docker image prune -f
 
       - name: Smoke-test deployment
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          script: |
-            set -e
-            for i in $(seq 1 20); do
-              if curl -fs http://localhost:${BACKEND_PORT:-8080}/actuator/health >/dev/null; then
-                echo "Backend healthy."
-                exit 0
-              fi
-              sleep 5
-            done
-            echo "Backend did not become healthy in time" >&2
-            exit 1
+        run: |
+          set -e
+          for i in $(seq 1 20); do
+            if curl -fs http://localhost:${BACKEND_PORT:-8080}/actuator/health >/dev/null; then
+              echo "Backend healthy."
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Backend did not become healthy in time" >&2
+          exit 1
