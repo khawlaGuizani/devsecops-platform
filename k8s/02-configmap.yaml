@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: transport-config
+  namespace: transport
+data:
+  ACCEPT_EULA: "Y"
+  MSSQL_PID: "Express"
+  SPRING_DATASOURCE_URL: "jdbc:sqlserver://sqlserver:1433;databaseName=vanoiseee;encrypt=false;trustServerCertificate=true"
+  RASP_ENABLED: "true"
+  RASP_MODE: "block"
+  RASP_LOG_DIR: "/app/rasp-logs"
+  RASP_DEMO_ENABLED: "false"

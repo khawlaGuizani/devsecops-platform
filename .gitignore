@@ -2,6 +2,7 @@
 .env
 .env.local
 *.env
+k8s/01-secret.yaml
 
 # OS / editor cruft
 .DS_Store
